@@ -1,0 +1,108 @@
+services:
+  # Generate runtime.env from HCP Terraform outputs
+  tf-env:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    working_dir: /app
+    environment:
+      TFC_TOKEN: "${TFC_TOKEN}" # ${TFC_TOKEN} Terraform Cloud API token (set locally, not commited to GitHub)
+      TFC_ORG: "fhwn_bigdata" # ${TFC_ORG}
+      TFC_WORKSPACE: "BigDataProject" # ${TFC_WORKSPACE}
+      ENV_OUT: /run/runtime/runtime.env
+    command: ["python", "scripts/write_env_from_hcp.py"]
+    volumes:
+      - ./:/app
+      - runtime-env:/run/runtime
+
+  # Kafka producer (raw topic)
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    working_dir: /app
+    depends_on:
+      tf-env:
+        condition: service_completed_successfully
+    command: ["sh", "-lc", "set -a; . /run/runtime/runtime.env; set +a; python kafka/stream_ratings_to_kafka.py"]
+    volumes:
+      - ./:/app
+      - runtime-env:/run/runtime
+
+  # Spark streaming job: raw -> aggregates (Kafka -> Kafka)
+  spark-aggregates:
+    user: "0:0"
+    image: spark:4.0.1-scala2.13-java17-python3-ubuntu
+    working_dir: /app
+    depends_on:
+      tf-env:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/app
+      - runtime-env:/run/runtime
+      - spark-checkpoints:/tmp
+      - spark-ivy:/tmp/.ivy2-aggregates
+    command:
+      [
+        "sh", "-lc",
+        "set -a; . /run/runtime/runtime.env; set +a; \
+         mkdir -p /tmp/.ivy2-aggregates; \
+         rm -rf /tmp/checkpoint005; \
+         /opt/spark/bin/spark-submit \
+           --master local[*] \
+           --conf spark.jars.ivy=/tmp/.ivy2-aggregates \
+           --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1 \
+           /app/spark/aggregates_to_kafka.py"
+      ]
+
+  # Spark streaming job: aggregates -> alerts (Kafka -> Kafka)
+  spark-alerts:
+    user: "0:0"
+    image: spark:4.0.1-scala2.13-java17-python3-ubuntu
+    working_dir: /app
+    depends_on:
+      tf-env:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/app
+      - runtime-env:/run/runtime
+      - spark-checkpoints:/tmp
+      - spark-ivy:/tmp/.ivy2-alerts
+    command:
+      [
+        "sh", "-lc",
+        "set -a; . /run/runtime/runtime.env; set +a; \
+         mkdir -p /tmp/.ivy2-alerts; \
+         rm -rf /tmp/checkpoint006; \
+         /opt/spark/bin/spark-submit \
+           --master local[*] \
+           --conf spark.jars.ivy=/tmp/.ivy2-alerts \
+           --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1 \
+           /app/spark/alerts_to_kafka.py"
+      ]
+    
+# REST API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    working_dir: /app
+    depends_on:
+      tf-env:
+        condition: service_completed_successfully
+    ports:
+      - "5001:5000"
+    environment:
+      GOOGLE_CLOUD_PROJECT: prj-fhwn-2025-schimandl
+      GOOGLE_APPLICATION_CREDENTIALS: /service-account/service-account.json
+
+    command: ["sh", "-lc", "python api/rest_api.py"]
+    volumes:
+      - ./:/app
+      - runtime-env:/run/runtime
+      - ./service-account/service-account.json:/service-account/service-account.json:ro
+  
+volumes:
+  runtime-env:
+  spark-checkpoints:
+  spark-ivy:
