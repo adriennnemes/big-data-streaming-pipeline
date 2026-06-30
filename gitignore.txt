@@ -1,0 +1,14 @@
+**/.terraform/
+**/terraform.tfstate*
+
+.env
+.venv
+runtime.env
+
+*.geojson
+
+service-account/
+service-account/*.json
+
+.DS_Store
+**/.DS_Store
